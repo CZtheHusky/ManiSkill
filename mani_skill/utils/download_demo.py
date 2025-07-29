@@ -46,6 +46,8 @@ for env_id in [
         raw_dataset_url=f"https://huggingface.co/datasets/haosulab/ManiSkill_Demonstrations/resolve/main/demos/{env_id}.zip?download=true"
     )
 
+pbar = None
+
 
 def tqdmhook(t):
     last_b = [0]

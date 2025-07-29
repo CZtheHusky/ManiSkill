@@ -56,4 +56,5 @@ wrappers/index
 
 additional_resources/performance_benchmarking
 additional_resources/citation
+reference/index.rst
 ```

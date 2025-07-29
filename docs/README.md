@@ -7,12 +7,22 @@ Install Sphinx and Theme
 pip install -e .[docs]
 ```
 
+Build the documentation
+
+```bash
+# In docs/
+make html
+```
+
 Start a server to watch changes
 
 ```bash
 # In docs/
-rm -rf build/ && sphinx-autobuild --ignore ./source/api ./source ./build/html
+sphinx-autobuild ./source ./build/html
 ```
+
+
+For github links for the time being must double check they link the right branch/commit
 
 ## Auto Generate Task Docs
 

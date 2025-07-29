@@ -130,7 +130,6 @@ def main(argv):
                 "sphinxcontrib-video",
                 "sphinx-togglebutton",
                 "sphinx_design",
-                "sphinx-autoapi",
             ],
         },
     )
