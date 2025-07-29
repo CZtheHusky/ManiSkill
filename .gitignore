@@ -44,3 +44,6 @@ imgui.ini
 # testing
 .coverage*
 htmlcov/
+stack_cubes/
+ManiSkill_Demonstrations
+vlav-project
