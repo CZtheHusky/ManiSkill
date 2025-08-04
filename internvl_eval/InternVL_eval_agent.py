@@ -553,13 +553,13 @@ def eval_checkpoint(model_parent, ckpt_name, gpu_id):
     # from your_agent_file import InternVLEvalAgent
 
     inference_tag = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    num_envs = 64
+    num_envs = 32
     model_path = os.path.join(model_parent, ckpt_name)
     
     # Wrap the core logic in a try...finally block to ensure cleanup
     parent_tag = "mani_infer"
     max_episode_steps = 200
-    eval_steps = 200
+    eval_steps = 400
     try:
         # It's good practice to pass the device to your agent
         # The agent should then use this device, e.g., 'cuda:0'
@@ -631,7 +631,7 @@ if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
     
     # Define which GPUs to use
-    AVAILABLE_GPUS = [2, 4, 5, 1, 3] # Modify this to match your system
+    AVAILABLE_GPUS = [0, 4, 5, 6, 7] # Modify this to match your system
     NUM_GPUS = len(AVAILABLE_GPUS)
     model_parents = [
         "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532",
