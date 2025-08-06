@@ -360,10 +360,9 @@ class InternVLChatModel(PreTrainedModel):
             generation_config: Optional[GenerationConfig] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
+            img_context_token_id = None,
             **generate_kwargs,
     ) -> torch.LongTensor:
-
-        assert self.img_context_token_id is not None
         if pixel_values is not None:
             if visual_features is not None:
                 vit_embeds = visual_features
@@ -374,7 +373,7 @@ class InternVLChatModel(PreTrainedModel):
             input_embeds = input_embeds.reshape(B * N, C)
 
             input_ids = input_ids.reshape(B * N)
-            selected = (input_ids == self.img_context_token_id)
+            selected = (input_ids == self.img_context_token_id if self.img_context_token_id is not None else img_context_token_id)
             assert selected.sum() != 0
             input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
 

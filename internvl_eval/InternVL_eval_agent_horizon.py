@@ -383,6 +383,7 @@ def parse_action_vectors(s: str):
             # 用正则匹配形如 "+0 -8 -2 +3 -4 +13 +1" 的 7 个有符号整数
             matches = re.findall(r'[+-]?\d+', seg)
             if len(matches) != 7:
+                print(f"Error response: {seg}")
                 results.append(None)
             else:
                 results.append(np.array([int(m) for m in matches]))
@@ -496,7 +497,7 @@ class InternVLEvalAgent:
             low_cpu_mem_usage=True,
             trust_remote_code=True).eval().to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
-        self.generation_config = dict(max_new_tokens=1024, do_sample=True)
+        self.generation_config = dict(max_new_tokens=120, do_sample=True)
         self.instruction = "stack all the cubes" if instruction is None else instruction
         jsonl_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") if inference_tag is None else inference_tag
         self.jsonl_path = os.path.join(model_path, parent_tag, jsonl_name, 'inference.jsonl')
@@ -510,6 +511,7 @@ class InternVLEvalAgent:
             self.horizon = int(model_dir_name.split("_")[-1])
         else:
             self.horizon = 1
+        assert self.horizon != 1
         # if "_noState" in model_path:
         #     self.no_state = True
         # else:
@@ -540,7 +542,7 @@ class InternVLEvalAgent:
             qposes.append(qpos)
             camera = observations['sensor_data']["base_camera"]["rgb"][env_id].cpu().numpy()
             rescaled_qpos = np.round(qpos * 1000).astype(np.int32)
-            query = f"The current position state of the robotic arm's end gripper is as follows: {{Joint_0: {rescaled_qpos[0]}, Joint_1: {rescaled_qpos[1]}, Joint_2: {rescaled_qpos[2]}, Joint_3: {rescaled_qpos[3]}, Joint_4: {rescaled_qpos[4]}, Joint_5: {rescaled_qpos[5]}, Joint_6: {rescaled_qpos[6]}, Joint_7: {rescaled_qpos[7]}, Joint_8: {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+            query = f"The current joint state of the robotic arm is as follows: {{{rescaled_qpos[0]} {rescaled_qpos[1]} {rescaled_qpos[2]} {rescaled_qpos[3]} {rescaled_qpos[4]} {rescaled_qpos[5]} {rescaled_qpos[6]} {rescaled_qpos[7]} {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
             if self.dual_cam:
                 query = "<image><image>" + query
             else:
@@ -575,30 +577,54 @@ class InternVLEvalAgent:
         for env_id in range(self.num_envs):
             question = questions[env_id]
             response = responses[env_id]
-            action_extracted = parse_and_validate_vector(response)
-            if action_extracted is None:
-                action_extracted = np.zeros(7, dtype=np.float64)
-                if qposes[env_id][-1] >= 0.037:
-                    action_extracted[-1] = 1
+            # print(f"response: {response}")
+            action_extracted = parse_action_vectors(response)
+            # print(f"action extracted: {action_extracted}")
+            summon_actions = []
+            for sub_action in action_extracted:
+                if sub_action is None:
+                    break
                 else:
-                    action_extracted[-1] = -1
+                    # print(f"sub action: {sub_action}")
+                    sub_action = sub_action.astype(np.float32)
+                    sub_action[:-1] = sub_action[:-1] / 1000
+                    summon_actions.append(sub_action)
+                    # print(summon_actions[-1])
+            if len(summon_actions) > self.horizon:
+                summon_actions = summon_actions[:self.horizon]
             else:
-                action_extracted[:-1] = action_extracted[:-1] / 1000
+                tmp_action = np.zeros(7, dtype=np.float32)
+                if qposes[env_id][-1] >= 0.037:
+                    tmp_action[-1] = 1
+                else:
+                    tmp_action[-1] = -1
+                summon_actions += [tmp_action] * (self.horizon - len(summon_actions))
+            # if action_extracted is None:
+            #     action_extracted = np.zeros(7, dtype=np.float64)
+            #     if qposes[env_id][-1] >= 0.037:
+            #         action_extracted[-1] = 1
+            #     else:
+            #         action_extracted[-1] = -1
+            # else:
+            #     action_extracted[:-1] = action_extracted[:-1] / 1000
             # print("-----------------------------------------------------")
-            action_to_print = [np.round(a, 3) for a in action_extracted.values()] if isinstance(action_extracted, dict) else [np.round(a, 3) for a in action_extracted]
+            action_to_print = [[float(np.round(a, 3)) for a in sub_action] for sub_action in summon_actions]
             # print(f'User: {question}\nAction: {action_to_print}')
             # print("-----------------------------------------------------")
-            actions.append(action_extracted)
+            actions.append(summon_actions)
             append_to_jsonl({
                 "question": question,
                 "response": response,
-                "action_vector": [float(a) for a in action_to_print],
+                "action_vector": action_to_print,
                 'qpos': [float(np.round(q, 3)) for q in qposes[env_id]],
                 'env_id': env_id,
             }, self.jsonl_path)
-        return np.array(actions)
+        action_rearange = []
+        for i in range(self.horizon):
+            action_rearange.append(np.array([summon_actions[i] for summon_actions in actions]))
+        return action_rearange
     
-def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
+def eval_checkpoint(model_parent, ckpt_name, instruction=None, gpu_id=0):
     # --- Key Change 3: Set the GPU for this specific process ---
     # This MUST be the first thing you do before any CUDA/gym/torch initialization.
     print(f"Process {os.getpid()} starting evaluation of {ckpt_name} on GPU {gpu_id}")
@@ -611,13 +637,13 @@ def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
     model_path = os.path.join(model_parent, ckpt_name)
     
     # Wrap the core logic in a try...finally block to ensure cleanup
-    parent_tag = "mani_infer"
-    max_episode_steps = 200
-    eval_steps = 200
+
     try:
         # It's good practice to pass the device to your agent
         # The agent should then use this device, e.g., 'cuda:0'
         # Note: After setting CUDA_VISIBLE_DEVICES, GPU 0 for this process *is* the assigned gpu_id
+        parent_tag = "mani_infer"
+        max_episode_steps = 200
         agent = InternVLEvalAgent(
             model_path=model_path,
             instruction=instruction,
@@ -626,7 +652,7 @@ def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
             num_envs=num_envs,
             device=f"cuda:0",
         )
-        
+        eval_steps = 200 // agent.horizon
         # It's good practice to include the GPU ID in the save path
         save_dir = os.path.join(model_path, parent_tag, f"{inference_tag}")
         video_recorder = VideoRecorder(save_path=os.path.join(save_dir, "videos"), fps=30, num_envs=num_envs)
@@ -646,21 +672,29 @@ def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
         obs, _ = eval_envs.reset(seed=0)
         eval_metrics = defaultdict(list)
         last_obs = obs
+        # import debugpy; debugpy.listen(5678);debugpy.wait_for_client()
         for i in range(eval_steps):
             actions = agent.get_next_action(obs)
-            obs, reward, terminated, truncated, infos = eval_envs.step(actions)
-            # success = infos['success'].cpu().numpy()
-            reward = reward.cpu().numpy()
-            is_terminals = np.logical_or(truncated.cpu().numpy(), terminated.cpu().numpy())
-            cameras = [last_obs['sensor_data']["base_camera"]["rgb"].cpu().numpy(), last_obs['sensor_data']["hand_camera"]["rgb"].cpu().numpy()]
-            video_recorder.append_obs(cameras, reward, is_terminals, actions)
-            last_obs = obs
-            done_env_ids = np.where(is_terminals)[0]
-            for env_id in done_env_ids:
-                print(f"GPU {gpu_id}: Env {env_id} terminated, reward: {reward[env_id]}.")
-            if truncated.any():
-                for k, v in infos["final_info"]["episode"].items():
-                    eval_metrics[k].append(v.float())
+            done_mask = np.zeros(num_envs, dtype=bool)
+            for sub_action in actions:
+                for sub_idx, is_done in enumerate(done_mask):
+                    if is_done:
+                        sub_action[sub_idx] = np.zeros(7, dtype=np.float32)
+                        sub_action[sub_idx][-1] = 1
+                obs, reward, terminated, truncated, infos = eval_envs.step(sub_action)
+                # success = infos['success'].cpu().numpy()
+                reward = reward.cpu().numpy()
+                is_terminals = np.logical_or(truncated.cpu().numpy(), terminated.cpu().numpy())
+                done_mask = np.logical_or(done_mask, is_terminals)
+                cameras = [last_obs['sensor_data']["base_camera"]["rgb"].cpu().numpy(), last_obs['sensor_data']["hand_camera"]["rgb"].cpu().numpy()]
+                video_recorder.append_obs(cameras, reward, is_terminals, sub_action)
+                last_obs = obs
+                done_env_ids = np.where(is_terminals)[0]
+                for env_id in done_env_ids:
+                    print(f"GPU {gpu_id}: Env {env_id} terminated, reward: {reward[env_id]}.")
+                if truncated.any():
+                    for k, v in infos["final_info"]["episode"].items():
+                        eval_metrics[k].append(v.float())
         
         video_recorder.close()
         print(f"GPU {gpu_id}: All videos for {ckpt_name} saved to {video_recorder.save_path}.")
@@ -685,35 +719,35 @@ if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
     
     # Define which GPUs to use
-    AVAILABLE_GPUS = [2, 3, 4, 5] # Modify this to match your system
+    AVAILABLE_GPUS = [7,5,4,3,1,0] # Modify this to match your system
     NUM_GPUS = len(AVAILABLE_GPUS)
     # model_parents = [
     #     "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532",
     #     "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104",]
     # instructions = [None] * len(model_parents)
     model_parents = [
-        "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250729-171130",
-        "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250729-175554",
+        "vlav-project/maniskill_stack_cubes_dual_horizon_4/internvl2-2b/v0-20250804-023954",
+        # "vlav-project/maniskill_stack_cubes_dual_horizon_8/internvl2-2b/v4-20250804-014535"
     ]
     instructions = ['stack the red cube on top of the green one'] * len(model_parents)
     # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532"
     # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104"
+    tasks_to_run = []
     for model_parent, instruction in zip(model_parents, instructions):
         print("Model_path:", model_parent)
         # 1. Collect all tasks to be run
-        tasks_to_run = []
         checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
         # from small to large
         checkpoints.sort(key=lambda x: int(x.split('-')[1]))        
-        for i, ckpt_name in enumerate(checkpoints[-NUM_GPUS:]): 
-            gpu_id = AVAILABLE_GPUS[i % NUM_GPUS] # Cycle through available GPUs
-            tasks_to_run.append((model_parent, ckpt_name, gpu_id, instruction))
+        for i, ckpt_name in enumerate(checkpoints[1:]): 
+            tasks_to_run.append([model_parent, ckpt_name, instruction])
 
         print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
-        
+    for gpu_id, task in enumerate(tasks_to_run):
         # 2. Create a process pool and run the tasks in parallel
-        with multiprocessing.Pool(processes=NUM_GPUS) as pool:
-            # Use starmap to pass multiple arguments to the worker function
-            pool.starmap(eval_checkpoint, tasks_to_run)
+        task.append(AVAILABLE_GPUS[gpu_id % len(AVAILABLE_GPUS)])
+    with multiprocessing.Pool(processes=NUM_GPUS) as pool:
+        # Use starmap to pass multiple arguments to the worker function
+        pool.starmap(eval_checkpoint, tasks_to_run)
 
-        print("All evaluation tasks have been completed.")
+    print("All evaluation tasks have been completed.")
