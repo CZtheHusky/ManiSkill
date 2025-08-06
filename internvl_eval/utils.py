@@ -15,6 +15,197 @@ from PIL import Image
 import os
 import json
 
+
+class InternVLPretrainDatasetGenerator:
+    def __init__(self, dataset, save_path: str, horizon=1, dual_camera=False, scale_factor=1000,):
+        """
+        Initializes the dataset generator for InternVL pretraining.
+
+        Args:
+            dataset_path (str): Path to the dataset file.
+            load_count (int): Number of trajectories to load. If -1, loads all.
+            success_only (bool): Whether to filter for successful trajectories only.
+            device: Device to load data onto (e.g., 'cpu', 'cuda').
+        """
+        self.dataset = dataset
+        self.save_path = save_path
+        self.img_save_path = os.path.join(save_path, "images")
+        os.makedirs(self.img_save_path, exist_ok=True)
+        rng = np.random.default_rng(0)
+        num_steps = np.sum([len(act) for act in dataset.actions])
+        self.val_ids = set(rng.choice(num_steps, size=num_steps // 20, replace=False))
+        self.rng = rng
+        self.rescale_array = {
+            'action': np.array([scale_factor] * 6 + [1]),
+            'qpos': np.array([scale_factor] * 9),
+            'tcp_pose': np.array([scale_factor] * 7)
+        }
+        self.horizon = horizon
+        self.dual_camera = dual_camera
+        self.scale_factor = scale_factor
+        if "StackCube-v1" in self.dataset.env_id:
+            self.instruction = "stack all the cubes"
+        
+    def cal_statistics(self):
+        statistics = {
+            'action': {},
+            'qpos': {},
+            'tcp_pose': {}
+        }
+        all_collections = {
+            'action': [],
+            'qpos': [],
+            'tcp_pose': []
+        }
+        for data in self.dataset:
+            # camera = data['sensor_data']["base_camera"]["rgb"]
+            qpos = data["agent"]["qpos"]
+            tcp_pose = data["extra"]["tcp_pose"]
+            action = data["action"]
+            all_collections['action'].append(action)
+            all_collections['qpos'].append(qpos)
+            all_collections['tcp_pose'].append(tcp_pose)
+
+        for key in statistics.keys():
+            all_data = all_collections[key]
+            statistics[key]['mean'] = np.mean(all_data, axis=0).tolist()
+            statistics[key]['std'] = np.std(all_data, axis=0).tolist()
+            statistics[key]['min'] = np.min(all_data, axis=0).tolist()
+            statistics[key]['max'] = np.max(all_data, axis=0).tolist()
+        # print("Statistics calculated:", statistics)
+        self.statistics = statistics
+        with open(os.path.join(self.save_path, 'statistics.json'), 'w') as f:
+            json.dump(statistics, f, indent=4)
+
+        # for key in statistics.keys():
+        #     for idx, (max_v, min_v) in enumerate(zip(statistics[key]['max'], statistics[key]['min'])):
+        #         if abs(max_v) > 1 or abs(min_v) > 1 and self.rescale_array[key][idx] != 1:
+        #             self.rescale_array[key][idx] = 100
+     
+    def rescale(self, data, key):
+        _tmp_data = np.round(data * self.rescale_array[key]).astype(np.int32)
+        if key == "action":
+            _tmp_data = np.clip(-999, 999, _tmp_data)
+        return _tmp_data
+    
+    def process_episode_data(self, episode_data):
+        infos = []
+        for i in range(len(episode_data['queries'])):
+            if i + self.horizon > len(episode_data['queries']):
+                responses = " ".join(episode_data['action_strs'][i:])
+                delta = i + self.horizon - len(episode_data['queries'])
+                responses += f" +0 +0 +0 +0 +0 +0 {episode_data['action_strs'][-1][-3:-1]}|" * delta
+            else:
+                responses = " ".join(episode_data['action_strs'][i:i+self.horizon])
+            data_dict = {
+                'query': episode_data['queries'][i],
+                'response': responses,
+                'images': episode_data['cameras_save_path'][i]
+            }
+            infos.append(data_dict)
+        return infos
+
+    def traj_generation(self):
+        all_infos = []
+        val_infos = []
+        train_infos = []
+        for episode_idx, (obs, action, terminated, truncated) in enumerate(self.dataset):
+            episode_data = {
+                "queries": [],
+                "action_strs": [],
+                "cameras_save_path": [],
+            }
+            cameras = obs['sensor_data']["base_camera"]["rgb"]
+            hand_cameras = obs['sensor_data']["hand_camera"]["rgb"]
+            qposes = obs["agent"]["qpos"]
+            tcp_poses = obs["extra"]["tcp_pose"]
+            rescaled_qposes = self.rescale(qposes, 'qpos')
+            rescaled_tcp_poses = self.rescale(tcp_poses, 'tcp_pose')
+            rescaled_actions = self.rescale(action, 'action')
+            for local_step, (camera, hand_camera, rescaled_action, rescaled_qpos, rescaled_tcp_pose) in enumerate(zip(cameras, hand_cameras, rescaled_actions, rescaled_qposes, rescaled_tcp_poses)): 
+                camera_save_path = os.path.join(self.img_save_path, f"{episode_idx}_{local_step}_0.jpg")
+                hand_camera_save_path = os.path.join(self.img_save_path, f"{episode_idx}_{local_step}_1.jpg")
+                camera_save_name = camera_save_path
+                hand_camera_save_name = hand_camera_save_path
+                if not os.path.exists(camera_save_path):
+                    img = Image.fromarray(camera)
+                    img.save(camera_save_path)
+                if not os.path.exists(hand_camera_save_path):
+                    hand_img = Image.fromarray(hand_camera)
+                    hand_img.save(hand_camera_save_path)
+                query = f"The current joint state of the robotic arm is as follows: {{{rescaled_qpos[0]} {rescaled_qpos[1]} {rescaled_qpos[2]} {rescaled_qpos[3]} {rescaled_qpos[4]} {rescaled_qpos[5]} {rescaled_qpos[6]} {rescaled_qpos[7]} {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+                action_str = " ".join([f"+{str(int(a))}" if a >= 0 else f"{str(int(a))}" for a in rescaled_action])
+                action_str = action_str + '|'
+                episode_data['queries'].append(query)
+                episode_data['action_strs'].append(action_str)
+                episode_data['cameras_save_path'].append([camera_save_name, hand_camera_save_name])
+            infos = self.process_episode_data(episode_data)
+            all_infos.extend(infos)
+        if self.dual_camera:
+            prefix = "dualcam_"
+        else:
+            prefix = ""
+        if self.scale_factor == 100:
+            prefix += "100"
+        else:
+            prefix += "1000"
+        for idx in range(len(all_infos)):
+            if idx in self.val_ids:
+                val_infos.append(all_infos[idx])
+            else:
+                train_infos.append(all_infos[idx])
+        with open(os.path.join(self.save_path, prefix + f'dataset_{self.horizon}.json'), 'w') as f:
+            json.dump(train_infos, f, indent=4)
+        with open(os.path.join(self.save_path, "val_" + prefix + f'dataset_{self.horizon}.json'), 'w') as f:
+            json.dump(val_infos, f, indent=4)
+        
+    
+    def generation(self):
+        json_infos = []
+        val_infos = []
+        for idx, data in enumerate(self.dataset):
+            data_dict = {}
+            is_done = data["terminated"] or data["truncated"]
+            camera = data["obs"]['sensor_data']["base_camera"]["rgb"]
+            hand_camera = data["obs"]['sensor_data']["hand_camera"]["rgb"]
+            qpos = data["obs"]["agent"]["qpos"]
+            tcp_pose = data["obs"]["extra"]["tcp_pose"]
+            action = data["action"]
+            rescaled_qpos = self.rescale(qpos, 'qpos')
+            rescaled_tcp_pose = self.rescale(tcp_pose, 'tcp_pose')
+            rescaled_action = self.rescale(action, 'action')
+            if not os.path.exists(os.path.join(self.img_save_path, f"{idx}.jpg")):
+                img = Image.fromarray(camera)
+                img.save(os.path.join(self.img_save_path, f"{idx}.jpg"))
+            if not os.path.exists(os.path.join(self.img_save_path, f"{idx}_hand.jpg")):
+                hand_img = Image.fromarray(hand_camera)
+                hand_img.save(os.path.join(self.img_save_path, f"{idx}_hand.jpg"))
+            
+            query = f"The current joint state of the robotic arm is as follows: {{{rescaled_qpos[0]} {rescaled_qpos[1]} {rescaled_qpos[2]} {rescaled_qpos[3]} {rescaled_qpos[4]} {rescaled_qpos[5]} {rescaled_qpos[6]} {rescaled_qpos[7]} {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+            action_str = " ".join([f"{str(int(a))}" for a in rescaled_action])
+            action_str = '{' + action_str + '}'
+            data_dict['query'] = query
+            data_dict['response'] = action_str
+            data_dict['images'] = [os.path.join(self.img_save_path, f"{idx}.jpg"), os.path.join(self.img_save_path, f"{idx}_hand.jpg")]
+            if idx in self.val_ids:
+                val_infos.append(data_dict)
+            else:
+                json_infos.append(data_dict)
+        if self.dual_camera:
+            prefix = "dualcam_"
+        else:
+            prefix = ""
+        if self.scale_factor == 100:
+            prefix += "100"
+        else:
+            prefix += "1000"
+        with open(os.path.join(self.save_path, prefix + f'dataset_{self.horizon}.json'), 'w') as f:
+            json.dump(json_infos, f, indent=4)
+        with open(os.path.join(self.save_path, "val_" + prefix + f'dataset_{self.horizon}.json'), 'w') as f:
+            json.dump(val_infos, f, indent=4)
+            
+                      
+
 def load_h5_data(data):
     out = dict()
     for k in data.keys():
@@ -250,7 +441,7 @@ class ManiSkillTrajectoryDataset(Dataset):
         return res
 
 class InternVLPretrainDatasetGenerator:
-    def __init__(self, dataset: ManiSkillTrajectoryDataset, save_path: str, horizon=1, dual_camera=False):
+    def __init__(self, dataset: ManiSkillTrajectoryDataset, save_path: str, horizon=1, dual_camera=False, scale_factor=1000,):
         """
         Initializes the dataset generator for InternVL pretraining.
 
@@ -265,17 +456,20 @@ class InternVLPretrainDatasetGenerator:
         self.img_save_path = os.path.join(save_path, "images")
         os.makedirs(self.img_save_path, exist_ok=True)
         rng = np.random.default_rng(0)
-        num_steps = np.sum([len(act) for act in dataset.actions])
+        try:
+            num_steps = np.sum([len(act) for act in dataset.actions])
+        except:
+            num_steps = len(dataset.actions)
         self.val_ids = set(rng.choice(num_steps, size=num_steps // 20, replace=False))
         self.rng = rng
         self.rescale_array = {
-            'action': np.array([1000] * 6 + [1]),
-            'qpos': np.array([1000] * 9),
-            'tcp_pose': np.array([1000] * 7)
+            'action': np.array([scale_factor] * 6 + [1]),
+            'qpos': np.array([scale_factor] * 9),
+            'tcp_pose': np.array([scale_factor] * 7)
         }
         self.horizon = horizon
         self.dual_camera = dual_camera
-
+        self.scale_factor = scale_factor
         if "StackCube-v1" in self.dataset.env_id:
             self.instruction = "stack all the cubes"
         
@@ -378,6 +572,10 @@ class InternVLPretrainDatasetGenerator:
             prefix = "dualcam_"
         else:
             prefix = ""
+        if self.scale_factor == 100:
+            prefix += "100"
+        else:
+            prefix += "1000"
         for idx in range(len(all_infos)):
             if idx in self.val_ids:
                 val_infos.append(all_infos[idx])
@@ -424,6 +622,8 @@ class InternVLPretrainDatasetGenerator:
             prefix = "dualcam_"
         else:
             prefix = ""
+        if self.scale_factor == 100:
+            prefix += "100"
         with open(os.path.join(self.save_path, prefix + f'dataset_{self.horizon}.json'), 'w') as f:
             json.dump(json_infos, f, indent=4)
         with open(os.path.join(self.save_path, "val_" + prefix + f'dataset_{self.horizon}.json'), 'w') as f:

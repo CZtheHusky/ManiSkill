@@ -5,10 +5,11 @@
 # --------------------------------------------------------
 import warnings
 from typing import Any, List, Optional, Tuple, Union
-
+import os
 import torch.utils.checkpoint
 import transformers
 from torch import nn
+import json
 from torch.nn import CrossEntropyLoss
 from transformers import (AutoModel, GenerationConfig, LlamaForCausalLM,
                           LlamaTokenizer)
@@ -20,9 +21,29 @@ from .configuration_internvl_chat import InternVLChatConfig
 from .conversation import get_conv_template
 from .modeling_intern_vit import InternVisionModel
 from .modeling_internlm2 import InternLM2ForCausalLM
+import os
+from transformers import AutoTokenizer
+
+script_path = os.path.abspath(__file__)        # 脚本本身的绝对路径
+script_dir  = os.path.dirname(script_path)     # 脚本所在目录
 
 logger = logging.get_logger(__name__)
 
+
+def mask_logits_with_allow_list(logits: torch.FloatTensor,
+                                allow_list: list[int],
+                                device: torch.device):
+    """
+    logits: Tensor[..., vocab_size]
+    allow_list: 允许的 token id 列表
+    """
+    vocab_size = logits.size(-1)
+    # 构造一个 shape=(vocab_size,) 的 mask，默认都是 -inf
+    mask = torch.full((vocab_size,), float('-inf'), device=device, dtype=logits.dtype)
+    # 把允许的那些位置设为 0
+    mask[allow_list] = 0.0
+    # 广播加到 logits 上：allowed 的 logits +0，不允许的 +(-inf)
+    return logits + mask
 
 def version_cmp(v1, v2, op='eq'):
     import operator
@@ -40,7 +61,7 @@ class InternVLChatModel(PreTrainedModel):
 
     def __init__(self, config: InternVLChatConfig, vision_model=None, language_model=None, use_flash_attn=False):
         super().__init__(config)
-
+        print(">>> Using my LOCAL modeling_internvl_chat.py")
         assert version_cmp(transformers.__version__, '4.36.2', 'ge')
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
@@ -50,6 +71,10 @@ class InternVLChatModel(PreTrainedModel):
         self.num_image_token = int((image_size // patch_size) ** 2 * (config.downsample_ratio ** 2))
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
+        # with open(os.path.join(os.path.dirname(__file__), 'added_tokens.json'), 'r') as f:
+        #     self.added_tokens = json.load(f)
+        # self.img_context_token_id = self.added_tokens['<IMG_CONTEXT>']
+        self.img_context_token_id = 92546
 
         logger.info(f'num_image_token: {self.num_image_token}')
         logger.info(f'ps_version: {self.ps_version}')
@@ -77,9 +102,13 @@ class InternVLChatModel(PreTrainedModel):
             nn.Linear(llm_hidden_size, llm_hidden_size)
         )
 
-        self.img_context_token_id = None
         self.conv_template = get_conv_template(self.template)
         self.system_message = self.conv_template.system_message
+        self.allow_list = None
+        
+
+    def set_action_allowed_fn(self, allow_list):
+        self.allow_list = allow_list
 
     def forward(
             self,
@@ -97,18 +126,19 @@ class InternVLChatModel(PreTrainedModel):
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        image_flags = image_flags.squeeze(-1)
         input_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         vit_embeds = self.extract_feature(pixel_values)
-        vit_embeds = vit_embeds[image_flags == 1]
+        if image_flags is not None:
+            image_flags = image_flags.squeeze(-1)
+            vit_embeds = vit_embeds[image_flags == 1]
         vit_batch_size = pixel_values.shape[0]
 
         B, N, C = input_embeds.shape
         input_embeds = input_embeds.reshape(B * N, C)
 
-        if torch.distributed.get_rank() == 0:
-            print(f'dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}')
+        # if torch.distributed.get_rank() == 0:
+        #     print(f'dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}')
 
         input_ids = input_ids.reshape(B * N)
         selected = (input_ids == self.img_context_token_id)
@@ -134,7 +164,7 @@ class InternVLChatModel(PreTrainedModel):
             return_dict=return_dict,
         )
         logits = outputs.logits
-
+        logits = mask_logits_with_allow_list(logits, self.allow_list, logits.device)
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -208,11 +238,15 @@ class InternVLChatModel(PreTrainedModel):
             print('Warning: `image_counts` is deprecated. Please use `num_patches_list` instead.')
 
         img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        if self.img_context_token_id is not None:
+            assert self.img_context_token_id == img_context_token_id, \
+                f'img_context_token_id is already set to {self.img_context_token_id}, ' \
+                f'but got {img_context_token_id}. Please set it before calling batch_chat.'
         self.img_context_token_id = img_context_token_id
 
-        if verbose and pixel_values is not None:
-            image_bs = pixel_values.shape[0]
-            print(f'dynamic ViT batch size: {image_bs}')
+        # if verbose and pixel_values is not None:
+        #     image_bs = pixel_values.shape[0]
+        #     print(f'dynamic ViT batch size: {image_bs}')
 
         queries = []
         for idx, num_patches in enumerate(num_patches_list):
@@ -257,11 +291,15 @@ class InternVLChatModel(PreTrainedModel):
             print('Warning: `image_counts` is deprecated. Please use `num_patches_list` instead.')
 
         img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        if self.img_context_token_id is not None:
+            assert self.img_context_token_id == img_context_token_id, \
+                f'img_context_token_id is already set to {self.img_context_token_id}, ' \
+                f'but got {img_context_token_id}. Please set it before calling batch_chat.'
         self.img_context_token_id = img_context_token_id
 
-        if verbose and pixel_values is not None:
-            image_bs = pixel_values.shape[0]
-            print(f'dynamic ViT batch size: {image_bs}')
+        # if verbose and pixel_values is not None:
+        #     image_bs = pixel_values.shape[0]
+        #     print(f'dynamic ViT batch size: {image_bs}')
 
         queries = []
         for idx, num_patches in enumerate(num_patches_list):
@@ -306,6 +344,10 @@ class InternVLChatModel(PreTrainedModel):
         assert pixel_values is None or len(pixel_values) == sum(num_patches_list)
 
         img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        if self.img_context_token_id is not None:
+            assert self.img_context_token_id == img_context_token_id, \
+                f'img_context_token_id is already set to {self.img_context_token_id}, ' \
+                f'but got {img_context_token_id}. Please set it before calling batch_chat.'
         self.img_context_token_id = img_context_token_id
 
         template = get_conv_template(self.template)
@@ -320,9 +362,9 @@ class InternVLChatModel(PreTrainedModel):
         template.append_message(template.roles[1], None)
         query = template.get_prompt()
 
-        if verbose and pixel_values is not None:
-            image_bs = pixel_values.shape[0]
-            print(f'dynamic ViT batch size: {image_bs}')
+        # if verbose and pixel_values is not None:
+        #     image_bs = pixel_values.shape[0]
+        #     print(f'dynamic ViT batch size: {image_bs}')
 
         for num_patches in num_patches_list:
             image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.num_image_token * num_patches + IMG_END_TOKEN
@@ -360,7 +402,6 @@ class InternVLChatModel(PreTrainedModel):
             generation_config: Optional[GenerationConfig] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
-            img_context_token_id = None,
             **generate_kwargs,
     ) -> torch.LongTensor:
         if pixel_values is not None:
@@ -373,9 +414,18 @@ class InternVLChatModel(PreTrainedModel):
             input_embeds = input_embeds.reshape(B * N, C)
 
             input_ids = input_ids.reshape(B * N)
-            selected = (input_ids == self.img_context_token_id if self.img_context_token_id is not None else img_context_token_id)
+            assert self.img_context_token_id is not None, "img_context_token_id is not set. Please set it before calling generate."
+            selected = (input_ids == self.img_context_token_id)
             assert selected.sum() != 0
-            input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
+            vit_embeds = vit_embeds.reshape(-1, C)
+
+            # 明确转换 dtype
+            if vit_embeds.dtype != input_embeds.dtype:
+                vit_embeds = vit_embeds.to(dtype=input_embeds.dtype)
+
+            # 安全赋值
+            input_embeds[selected] = vit_embeds.to(device=input_embeds.device)
+            # input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
 
             input_embeds = input_embeds.reshape(B, N, C)
         else:

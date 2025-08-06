@@ -467,6 +467,18 @@ def parse_and_validate_vector(input_str: str):
         print("Error response:", input_str)
         return None
 
+from transformers import LogitsProcessorList, GenerationConfig
+from transformers.generation.logits_process import PrefixConstrainedLogitsProcessor
+
+# Safe 版本，底层依旧会调用 prefix_allowed_tokens_fn
+class SafePrefixConstrainedLogitsProcessor(PrefixConstrainedLogitsProcessor):
+    def __call__(self, input_ids, scores):
+        # 如果 length=0，跳过约束，直接返回原始 scores
+        if input_ids.shape[-1] == 0:
+            return scores
+        # length>0 时，执行正常的前缀约束流程，
+        # 内部会调用 self.prefix_allowed_tokens_fn(batch_id, sent)
+        return super().__call__(input_ids, scores)
 
 class InternVLEvalAgent:
     def __init__(
@@ -476,8 +488,30 @@ class InternVLEvalAgent:
         parent_tag: str = None,
         inference_tag: str = None,
         num_envs: int = 1,
-        device: str = "cuda:0"
+        device: str = "cuda:0",
+        output_control=False,
     ):
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
+        SIGNS = [' +', ' -', '|', '{', '}', ' ']
+        numbers = list(range(0, 1000))
+        # tokenizer = AutoTokenizer.from_pretrained(script_dir, trust_remote_code=True, use_fast=False)
+        allow_list = []
+        for str_ in SIGNS:
+            toks = tokenizer.tokenize(str_)
+            assert len(toks) == 1
+            allow_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        for str_ in numbers:
+            toks = tokenizer.tokenize(str(str_))
+            assert len(toks) == 1
+            allow_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        prefix_allow_fn = lambda x, y: allow_list
+        processor_list = LogitsProcessorList([
+            SafePrefixConstrainedLogitsProcessor(
+                prefix_allowed_tokens_fn=prefix_allow_fn,
+                num_beams=1,          # 或你 generate 时用的 beam 数
+            )
+        ])
+
         current_file_path = os.path.dirname(os.path.abspath(__file__))
         modeling_name = "modeling_internvl_chat.py"
         modeling_path = os.path.join(current_file_path, modeling_name)
@@ -491,14 +525,14 @@ class InternVLEvalAgent:
         elif not os.path.exists(modeling_to_replace):
             shutil.copy(src=modeling_path, dst=modeling_to_replace)
 
+
         self.model = AutoModel.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             trust_remote_code=True).eval().to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
-        self.generation_config = dict(max_new_tokens=120, do_sample=True)
-        self.instruction = "stack all the cubes" if instruction is None else instruction
+        self.instruction = "stack the red cube on top of the green one" if instruction is None else instruction
         jsonl_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") if inference_tag is None else inference_tag
         self.jsonl_path = os.path.join(model_path, parent_tag, jsonl_name, 'inference.jsonl')
         self.num_envs = num_envs
@@ -512,6 +546,15 @@ class InternVLEvalAgent:
         else:
             self.horizon = 1
         assert self.horizon != 1
+        self.generation_config = dict(max_new_tokens=15 * self.horizon, do_sample=True, logits_processor=processor_list)
+        if not output_control:
+            del self.generation_config['logits_processor']
+        if "1000" in model_dir_name:
+            self.scale_factor = 1000
+        elif "100" in model_dir_name:
+            self.scale_factor = 100
+        else:
+            self.scale_factor = 1000
         # if "_noState" in model_path:
         #     self.no_state = True
         # else:
@@ -541,7 +584,7 @@ class InternVLEvalAgent:
             qpos = observations["agent"]["qpos"][env_id].cpu().numpy()
             qposes.append(qpos)
             camera = observations['sensor_data']["base_camera"]["rgb"][env_id].cpu().numpy()
-            rescaled_qpos = np.round(qpos * 1000).astype(np.int32)
+            rescaled_qpos = np.round(qpos * self.scale_factor).astype(np.int32)
             query = f"The current joint state of the robotic arm is as follows: {{{rescaled_qpos[0]} {rescaled_qpos[1]} {rescaled_qpos[2]} {rescaled_qpos[3]} {rescaled_qpos[4]} {rescaled_qpos[5]} {rescaled_qpos[6]} {rescaled_qpos[7]} {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
             if self.dual_cam:
                 query = "<image><image>" + query
@@ -587,7 +630,7 @@ class InternVLEvalAgent:
                 else:
                     # print(f"sub action: {sub_action}")
                     sub_action = sub_action.astype(np.float32)
-                    sub_action[:-1] = sub_action[:-1] / 1000
+                    sub_action[:-1] = sub_action[:-1] / self.scale_factor
                     summon_actions.append(sub_action)
                     # print(summon_actions[-1])
             if len(summon_actions) > self.horizon:
@@ -624,7 +667,7 @@ class InternVLEvalAgent:
             action_rearange.append(np.array([summon_actions[i] for summon_actions in actions]))
         return action_rearange
     
-def eval_checkpoint(model_parent, ckpt_name, instruction=None, gpu_id=0):
+def eval_checkpoint(model_parent, ckpt_name, gpu_id=0, output_control=True, instruction=None):
     # --- Key Change 3: Set the GPU for this specific process ---
     # This MUST be the first thing you do before any CUDA/gym/torch initialization.
     print(f"Process {os.getpid()} starting evaluation of {ckpt_name} on GPU {gpu_id}")
@@ -651,7 +694,9 @@ def eval_checkpoint(model_parent, ckpt_name, instruction=None, gpu_id=0):
             inference_tag=inference_tag,
             num_envs=num_envs,
             device=f"cuda:0",
+            output_control=output_control
         )
+
         eval_steps = 200 // agent.horizon
         # It's good practice to include the GPU ID in the save path
         save_dir = os.path.join(model_path, parent_tag, f"{inference_tag}")
@@ -715,39 +760,46 @@ def eval_checkpoint(model_parent, ckpt_name, instruction=None, gpu_id=0):
         
         
 if __name__ == "__main__":    
-    # Set the start method for multiprocessing (important for CUDA)
-    multiprocessing.set_start_method("spawn", force=True)
-    
-    # Define which GPUs to use
-    AVAILABLE_GPUS = [7,5,4,3,1,0] # Modify this to match your system
-    NUM_GPUS = len(AVAILABLE_GPUS)
-    # model_parents = [
-    #     "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532",
-    #     "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104",]
-    # instructions = [None] * len(model_parents)
-    model_parents = [
-        "vlav-project/maniskill_stack_cubes_dual_horizon_4/internvl2-2b/v0-20250804-023954",
-        # "vlav-project/maniskill_stack_cubes_dual_horizon_8/internvl2-2b/v4-20250804-014535"
+    NUM_GPUS = [6, 7]
+    tasks_to_run = [
+        ["vlav-project/maniskill_stack_cubes_dual_horizon_100_2/internvl2-2b/v1-20250805-040108", "checkpoint-240", 6, True],
+        ["vlav-project/maniskill_stack_cubes_dual_horizon_100_2/internvl2-2b/v1-20250805-040108", "checkpoint-240", 7, False],
+        ["vlav-project/maniskill_stack_cubes_dual_horizon_100_2/internvl2-2b/v1-20250805-040108", "checkpoint-320", 6, True],
+        ["vlav-project/maniskill_stack_cubes_dual_horizon_100_2/internvl2-2b/v1-20250805-040108", "checkpoint-320", 6, False],
     ]
-    instructions = ['stack the red cube on top of the green one'] * len(model_parents)
-    # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532"
-    # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104"
-    tasks_to_run = []
-    for model_parent, instruction in zip(model_parents, instructions):
-        print("Model_path:", model_parent)
-        # 1. Collect all tasks to be run
-        checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
-        # from small to large
-        checkpoints.sort(key=lambda x: int(x.split('-')[1]))        
-        for i, ckpt_name in enumerate(checkpoints[1:]): 
-            tasks_to_run.append([model_parent, ckpt_name, instruction])
+    # # Set the start method for multiprocessing (important for CUDA)
+    # multiprocessing.set_start_method("spawn", force=True)
+    
+    # # Define which GPUs to use
+    # AVAILABLE_GPUS = [6,7] # Modify this to match your system
+    # NUM_GPUS = len(AVAILABLE_GPUS)
+    # # model_parents = [
+    # #     "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532",
+    # #     "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104",]
+    # # instructions = [None] * len(model_parents)
+    # model_parents = [
+    #     "vlav-project/maniskill_stack_cubes_dual_horizon_2/internvl2-2b/v0-20250804-230001",
+    #     # "vlav-project/maniskill_stack_cubes_dual_horizon_8/internvl2-2b/v4-20250804-014535"
+    # ]
+    # instructions = ['stack the red cube on top of the green one'] * len(model_parents)
+    # # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532"
+    # # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104"
+    # tasks_to_run = []
+    # for model_parent, instruction in zip(model_parents, instructions):
+    #     print("Model_path:", model_parent)
+    #     # 1. Collect all tasks to be run
+    #     checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
+    #     # from small to large
+    #     checkpoints.sort(key=lambda x: int(x.split('-')[1]))        
+    #     for i, ckpt_name in enumerate(checkpoints[:1]): 
+    #         tasks_to_run.append([model_parent, ckpt_name, instruction])
 
-        print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
-    for gpu_id, task in enumerate(tasks_to_run):
-        # 2. Create a process pool and run the tasks in parallel
-        task.append(AVAILABLE_GPUS[gpu_id % len(AVAILABLE_GPUS)])
-    with multiprocessing.Pool(processes=NUM_GPUS) as pool:
+    #     print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
+    # for gpu_id, task in enumerate(tasks_to_run):
+    #     # 2. Create a process pool and run the tasks in parallel
+    #     task.append(AVAILABLE_GPUS[gpu_id % len(AVAILABLE_GPUS)])
+    with multiprocessing.Pool(processes=2) as pool:
         # Use starmap to pass multiple arguments to the worker function
         pool.starmap(eval_checkpoint, tasks_to_run)
 
-    print("All evaluation tasks have been completed.")
+    # print("All evaluation tasks have been completed.")

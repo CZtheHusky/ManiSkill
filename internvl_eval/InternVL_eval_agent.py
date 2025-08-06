@@ -497,19 +497,19 @@ class InternVLEvalAgent:
             trust_remote_code=True).eval().to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
         self.generation_config = dict(max_new_tokens=1024, do_sample=True)
-        self.instruction = "stack all the cubes" if instruction is None else instruction
+        self.instruction = "stack the red cube on top of the green one" if instruction is None else instruction
         jsonl_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") if inference_tag is None else inference_tag
         self.jsonl_path = os.path.join(model_path, parent_tag, jsonl_name, 'inference.jsonl')
         self.num_envs = num_envs
         self.device = device
-        if "dual" in model_path:
-            self.dual_cam = True
-        else:
-            self.dual_cam = False
-        if "horizon" in model_dir_name:
-            self.horizon = int(model_dir_name.split("_")[-1])
-        else:
-            self.horizon = 1
+        # if "dual" in model_path:
+        self.dual_cam = True
+        # else:
+            # self.dual_cam = False
+        # if "horizon" in model_dir_name:
+            # self.horizon = int(model_dir_name.split("_")[-1])
+        # else:
+            # self.horizon = 1
         # if "_noState" in model_path:
         #     self.no_state = True
         # else:
@@ -681,39 +681,45 @@ def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
         
         
 if __name__ == "__main__":    
-    # Set the start method for multiprocessing (important for CUDA)
-    multiprocessing.set_start_method("spawn", force=True)
+    model_parent = "/mnt/nfs3/caozhe/workspace/SimpleVLA-RL/ckpts/SimpleVLA-RL/maniskill_legacy/actor"
+    ckpt_name = "global_step_1"
+    gpu_id = 7
     
-    # Define which GPUs to use
-    AVAILABLE_GPUS = [2, 3, 4, 5] # Modify this to match your system
-    NUM_GPUS = len(AVAILABLE_GPUS)
+    eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction="stack the red cube on top of the green one")
+    # # Set the start method for multiprocessing (important for CUDA)
+    # multiprocessing.set_start_method("spawn", force=True)
+    
+    # # Define which GPUs to use
+    # AVAILABLE_GPUS = [2, 3, 4, 5] # Modify this to match your system
+    # NUM_GPUS = len(AVAILABLE_GPUS)
+    # # model_parents = [
+    # #     "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532",
+    # #     "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104",]
+    # # instructions = [None] * len(model_parents)
     # model_parents = [
-    #     "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532",
-    #     "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104",]
-    # instructions = [None] * len(model_parents)
-    model_parents = [
-        "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250729-171130",
-        "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250729-175554",
-    ]
-    instructions = ['stack the red cube on top of the green one'] * len(model_parents)
-    # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532"
-    # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104"
-    for model_parent, instruction in zip(model_parents, instructions):
-        print("Model_path:", model_parent)
-        # 1. Collect all tasks to be run
-        tasks_to_run = []
-        checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
-        # from small to large
-        checkpoints.sort(key=lambda x: int(x.split('-')[1]))        
-        for i, ckpt_name in enumerate(checkpoints[-NUM_GPUS:]): 
-            gpu_id = AVAILABLE_GPUS[i % NUM_GPUS] # Cycle through available GPUs
-            tasks_to_run.append((model_parent, ckpt_name, gpu_id, instruction))
+    #     # "vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250729-171130",
+    #     # "vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250729-175554",
+    #     # "/mnt/nfs3/caozhe/workspace/SimpleVLA-RL/ckpts/SimpleVLA-RL/maniskill_legacy/actor/global_step_1"
+    # ]
+    # instructions = ['stack the red cube on top of the green one'] * len(model_parents)
+    # # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes_dual/internvl2-2b/v0-20250725-182532"
+    # # model_parent = "/root/workspace/vlav-project/maniskill_stack_cubes/internvl2-2b/v0-20250725-171104"
+    # for model_parent, instruction in zip(model_parents, instructions):
+    #     print("Model_path:", model_parent)
+    #     # 1. Collect all tasks to be run
+    #     tasks_to_run = []
+    #     checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
+    #     # from small to large
+    #     checkpoints.sort(key=lambda x: int(x.split('-')[1]))        
+    #     for i, ckpt_name in enumerate(checkpoints[-NUM_GPUS:]): 
+    #         gpu_id = AVAILABLE_GPUS[i % NUM_GPUS] # Cycle through available GPUs
+    #         tasks_to_run.append((model_parent, ckpt_name, gpu_id, instruction))
 
-        print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
+    #     print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
         
-        # 2. Create a process pool and run the tasks in parallel
-        with multiprocessing.Pool(processes=NUM_GPUS) as pool:
-            # Use starmap to pass multiple arguments to the worker function
-            pool.starmap(eval_checkpoint, tasks_to_run)
+    #     # 2. Create a process pool and run the tasks in parallel
+    #     with multiprocessing.Pool(processes=NUM_GPUS) as pool:
+    #         # Use starmap to pass multiple arguments to the worker function
+    #         pool.starmap(eval_checkpoint, tasks_to_run)
 
-        print("All evaluation tasks have been completed.")
+    #     print("All evaluation tasks have been completed.")
