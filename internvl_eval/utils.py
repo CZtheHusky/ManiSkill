@@ -691,8 +691,8 @@ class InternVLPretrainDatasetGenerator:
         self.val_ids = set(rng.choice(num_steps, size=num_steps // 20, replace=False))
         self.rng = rng
         self.rescale_array = {
-            # 'action': np.array([1000] * 7 + [1]) if is_joint_action else np.array([1000, 1000, 1000, 57.3, 57.3, 57.3] + [1]),
-            'action': np.array([1000] * 7 + [1]) if is_joint_action else np.array([1000, 1000, 1000, 1000, 1000, 1000] + [1]),
+            'action': np.array([1000] * 7 + [1]) if is_joint_action else np.array([1000, 1000, 1000, 57.3, 57.3, 57.3] + [1]),
+            # 'action': np.array([1000] * 7 + [1]) if is_joint_action else np.array([1000, 1000, 1000, 1000, 1000, 1000] + [1]),
             'qpos': np.array([1000] * 9),
             'tcp_pose': np.array([1000] * 7)
         }
@@ -812,12 +812,15 @@ class InternVLPretrainDatasetGenerator:
                 eef_rpy = rescaled_tcp_pose[3:]
                 # query = f"The current joint state of the robotic arm is as follows: {{{rescaled_qpos[0]} {rescaled_qpos[1]} {rescaled_qpos[2]} {rescaled_qpos[3]} {rescaled_qpos[4]} {rescaled_qpos[5]} {rescaled_qpos[6]} {rescaled_qpos[7]} {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
                 # query = f"The current position state of the robotic arm's end gripper is as follows: {{x: {eef_xyz[0]}mm, y: {eef_xyz[1]}mm, z: {eef_xyz[2]}mm, roll: {eef_rpy[0]} degrees, pitch: {eef_rpy[1]} degrees, yaw: {eef_rpy[2]} degrees, open: {gripper_state}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
-                joints_str = ", ".join(f"Joint_{i}: {v}" for i, v in enumerate(rescaled_qpos[:8]))
-                query = f"The current position state of the robotic arm's end gripper is as follows: {{{joints_str}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
-                action_str = " ".join([f"{str(int(a))}" for a in rescaled_action])
+                # joints_str = ", ".join(f"Joint_{i}: {v}" for i, v in enumerate(rescaled_qpos[:8]))
+                # query = f"The current position state of the robotic arm's end gripper is as follows: {{{joints_str}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+                # action_str = " ".join([f"{str(int(a))}" for a in rescaled_action])
+                rescaled_action[-1] = 0 if rescaled_action[-1] == -1 else 1
+                query = f"The current position state of the robotic arm's end gripper is as follows: {{x: {eef_xyz[0]}mm, y: {eef_xyz[1]}mm, z: {eef_xyz[2]}mm, roll: {eef_rpy[0]} degrees, pitch: {eef_rpy[1]} degrees, yaw: {eef_rpy[2]} degrees, open: {gripper_state}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+                action_str = f"action: {{x: {rescaled_action[0]}mm, y: {rescaled_action[1]}mm, z: {rescaled_action[2]}mm, roll: {rescaled_action[3]} degrees, pitch: {rescaled_action[4]} degrees, yaw: {rescaled_action[5]} degrees, open: {rescaled_action[6]}}}"
                 action_str = action_str
-                if rescaled_action[0] >= 0:
-                    action_str = " " + action_str
+                # if rescaled_action[0] >= 0:
+                #     action_str = " " + action_str
                 episode_data['queries'].append(query)
                 episode_data['action_strs'].append(action_str)
                 if self.dual_camera:
@@ -864,10 +867,11 @@ class InternVLPretrainDatasetGenerator:
                 hand_img.save(os.path.join(self.img_save_path, f"{idx}_hand.jpg"))
             
             # query = f"The current joint state of the robotic arm is as follows: {{{rescaled_qpos[0]} {rescaled_qpos[1]} {rescaled_qpos[2]} {rescaled_qpos[3]} {rescaled_qpos[4]} {rescaled_qpos[5]} {rescaled_qpos[6]} {rescaled_qpos[7]} {rescaled_qpos[8]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
-            query = f"The current position state of the robotic arm's end gripper is as follows: {{Joint_0: {rescaled_qpos[0]}, Joint_1: {rescaled_qpos[1]}, Joint_2: {rescaled_qpos[2]}, Joint_3: {rescaled_qpos[3]}, Joint_4: {rescaled_qpos[4]}, Joint_5: {rescaled_qpos[5]}, Joint_6: {rescaled_qpos[6]}, Joint_7: {rescaled_qpos[7]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
-
-            action_str = " ".join([f"{str(int(a))}" for a in rescaled_action])
-            action_str = '{' + action_str + '}'
+            # query = f"The current position state of the robotic arm's end gripper is as follows: {{Joint_0: {rescaled_qpos[0]}, Joint_1: {rescaled_qpos[1]}, Joint_2: {rescaled_qpos[2]}, Joint_3: {rescaled_qpos[3]}, Joint_4: {rescaled_qpos[4]}, Joint_5: {rescaled_qpos[5]}, Joint_6: {rescaled_qpos[6]}, Joint_7: {rescaled_qpos[7]}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+            query = f"Based on whether the robot arm's gripper successfully grasps the object and the distance between the robot arm's endpoint and the target position in the image, provide a comprehensive rating, where a higher score indicates better task completion (max score 900). Please rate the completion of the robot arm with gripper follows instruction: sweep the trash to the white bin.\nThe current position state of the robotic arm's end gripper is as follows: {{x: {eef_xyz[0]}mm, y: {eef_xyz[1]}mm, z: {eef_xyz[2]}mm, roll: {eef_rpy[0]} degrees, pitch: {eef_rpy[1]} degrees, yaw: {eef_rpy[2]} degrees, open: {gripper_state}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+            action_str = f"action: {{x: {rescaled_action[0]}mm, y: {rescaled_action[1]}mm, z: {rescaled_action[2]}mm, roll: {rescaled_action[3]} degrees, pitch: {rescaled_action[4]} degrees, yaw: {rescaled_action[5]} degrees, open: {rescaled_action[6]}}}"
+            # action_str = " ".join([f"{str(int(a))}" for a in rescaled_action])
+            # action_str = '{' + action_str + '}'
             data_dict['query'] = query
             data_dict['response'] = action_str
             data_dict['images'] = [os.path.join(self.img_save_path, f"{idx}.jpg"), os.path.join(self.img_save_path, f"{idx}_hand.jpg")]
