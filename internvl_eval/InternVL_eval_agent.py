@@ -215,24 +215,36 @@ class InternVLEvalAgent:
                 'env_id': env_id,
             }, self.jsonl_path)
         return np.array(actions)
-    
-def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
+
+
+MAX_EPISODE_STEPS = {
+    "StackCube-v1": 150,
+    "PushCube-v1": 100
+}
+
+INSTRUCTIONS = {
+    "StackCube-v1": "stack the red cube on top of the green one",
+    "PickCube-v1": "pick up the red cube",
+    'PushCube-v1': 'push the cube to the target position',
+}
+
+def eval_checkpoint(model_parent, ckpt_name, env_id, gpu_id):
     # --- Key Change 3: Set the GPU for this specific process ---
     # This MUST be the first thing you do before any CUDA/gym/torch initialization.
-    print(f"Process {os.getpid()} starting evaluation of {ckpt_name} on GPU {gpu_id}")
+    print(f"Process {os.getpid()} starting evaluation of {ckpt_name} on GPU {gpu_id}, task {env_id}")
     # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     torch.cuda.set_device(gpu_id)
     # Assuming your agent and env setup use the GPU
     # from your_agent_file import InternVLEvalAgent
-
+    max_episode_steps = MAX_EPISODE_STEPS[env_id]
+    instruction = INSTRUCTIONS[env_id]
     inference_tag = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    num_envs = 64
     model_path = os.path.join(model_parent, ckpt_name)
-    
+    num_envs = 64
     # Wrap the core logic in a try...finally block to ensure cleanup
     parent_tag = "mani_infer"
-    max_episode_steps = 100
-    eval_steps = 100
+    total_eval_steps = num_envs * max_episode_steps
+    horizon = 1
     try:
         # It's good practice to pass the device to your agent
         # The agent should then use this device, e.g., 'cuda'
@@ -250,13 +262,13 @@ def eval_checkpoint(model_parent, ckpt_name, gpu_id, instruction=None):
         # It's good practice to include the GPU ID in the save path
         save_dir = os.path.join(model_path, parent_tag, f"{inference_tag}")
         video_recorder = VideoRecorder(save_path=os.path.join(save_dir, "videos"), fps=30, num_envs=num_envs)
-        
+        eval_steps = total_eval_steps // num_envs // horizon
         eval_envs = gym.make(
-            "PushCube-v1",
+            env_id,
             num_envs=num_envs,
             obs_mode="rgb",
             control_mode="pd_joint_delta_pos" if "joint" in model_path else "pd_ee_delta_pose",
-            sensor_configs={'height': 480, 'width': 480},
+            sensor_configs={'height': 448, 'width': 448},
             max_episode_steps=max_episode_steps,
             reconfiguration_freq=1,
             reward_mode='sparse',
@@ -318,7 +330,7 @@ if __name__ == "__main__":
     #     pool.starmap(eval_checkpoint, tasks_to_run)
     # # Define which GPUs to use
     # AVAILABLE_GPUS = [0,1,2,3,4,5,6,7] # Modify this to match your system
-    AVAILABLE_GPUS = [0,2,4,5,6,7]
+    AVAILABLE_GPUS = [0,1,2,3,4,5,6,7]
     NUM_GPUS = len(AVAILABLE_GPUS)
 
 
@@ -328,20 +340,21 @@ if __name__ == "__main__":
         # "vlav-project/maniskill_joint_dual/internvl2-2b/v0-20250809-021840",
         # "vlav-project/maniskill_joint_epds_dual/internvl2-2b/v0-20250809-030109",
         # "vlav-project/maniskill_legacy_reproduce_dual/internvl2-2b/v0-20250810-005645",
-        "vlav-project/train_push_cube500_legacy/internvl2-2b/v0-20250812-011657",
+        # "vlav-project/train_push_cube500_legacy/internvl2-2b/v0-20250812-011657",
         # "vlav-project/mani_stack_cubes_dual_joint_legacy_reproduce/internvl2-2b/v0-20250810-160449",
         # "vlav-project/mani_new_legacy_reproduce_dual/internvl2-2b/v0-20250810-172603",
+        "vlav-project/train_stack_cube100/internvl2-2b/v2-20250813-084855"
     ]
-    # instructions = ['stack the red cube on top of the green one'] * len(model_parents)
-    instructions = ['push the cube to the target position'] * len(model_parents)
+    env_ids = ['StackCube-v1'] * len(model_parents)
+    # instructions = ['push the cube to the target position'] * len(model_parents)
     global_index = 0
-    for model_parent, instruction in zip(model_parents, instructions):
+    for model_parent, env_id in zip(model_parents, env_ids):
         print("Model_path:", model_parent)
         checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
         checkpoints.sort(key=lambda x: int(x.split('-')[-1]), reverse=True)        
         for i, ckpt_name in enumerate(checkpoints): 
             gpu_id = AVAILABLE_GPUS[global_index % NUM_GPUS] # Cycle through available GPUs
-            tasks_to_run.append((model_parent, ckpt_name, gpu_id, instruction))
+            tasks_to_run.append((model_parent, ckpt_name, env_id, gpu_id))
             global_index += 1
     print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
     for task in tasks_to_run:
@@ -349,4 +362,4 @@ if __name__ == "__main__":
     # 2. Create a process pool and run the tasks in parallel
     with multiprocessing.Pool(processes=NUM_GPUS) as pool:
         # Use starmap to pass multiple arguments to the worker function
-        pool.starmap(eval_checkpoint, tasks_to_run[:4])
+        pool.starmap(eval_checkpoint, tasks_to_run)
