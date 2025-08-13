@@ -23,6 +23,45 @@ from transformers.generation.logits_process import PrefixConstrainedLogitsProces
 from copy import deepcopy
 import math
 
+
+def extract_action_vector(llm_output: str):
+    """
+    从 LLM 的输出字符串中提取一个 7D 动作向量。
+
+    Args:
+        llm_output: LLM 的字符串输出。
+                    示例: "action: {x: -129mm, y: 442mm, z: 183mm, roll: 2 degrees, pitch: 40 degrees, yaw: 0 degrees, open: 1}"
+                    绝对动作示例: "action: {x: -11mm, y: 20mm, z: 33mm, quat: 10, 20, 30, 22, open: 1}"
+
+    Returns:
+        对于相对动作 (is_abs=False)，返回一个元组 (delta_trans, delta_r, gripper_open)。
+        对于绝对动作 (is_abs=True)，返回一个元组 (abs_trans, abs_quat, gripper_open)。
+        如果无法找到所有值，则返回 None。
+    """
+    # Define the keys we want to extract in the desired final order
+    keys_in_order = ['x', 'y', 'z', 'roll', 'pitch', 'yaw', 'open']
+    
+    # This regex pattern finds all key-value pairs we are interested in.
+    # It captures the key (e.g., 'x') and its corresponding numeric value.
+    pattern = r"(x|y|z|roll|pitch|yaw|open):\s*(-?[\d.]+)"
+    
+    # re.findall will return a list of tuples, e.g., [('x', '-129'), ('y', '442'), ...]
+    matches = re.findall(pattern, llm_output)
+    
+    # Convert the list of tuples into a dictionary for easy lookup.
+    # The captured value is converted to a float.
+    data_dict = {key: float(value) for key, value in matches}
+    
+    # Assemble the vector in the correct order using the dictionary.
+    # We use .get() to safely handle cases where a key might be missing.
+    try:
+        vector = np.array([data_dict[key] for key in keys_in_order], dtype=np.float32)
+        return vector
+    except KeyError as e:
+        print(f"Error: Missing key {e} in the LLM output: {llm_output}")
+        return None
+
+
 def write_instruction_action(instruction: str, rgb: np.ndarray, action: str = None, raw_action: str = None):
     """
     在图片上方增加一个白色背景条，并写入 instruction。
@@ -790,6 +829,7 @@ class InternVLPretrainDatasetGenerator:
             tcp_pose = np.concatenate([tcp_pose[:, :3], rpys], axis=-1)
             tcp_pose[:, :3] = np.round(tcp_pose[:, :3] * 1000).astype(np.int32)
             tcp_pose[:, 3:] = np.round(tcp_pose[:, 3:]).astype(np.int32)
+            tcp_pose = tcp_pose.astype(np.int32)
             
             for local_step, (camera, hand_camera, rescaled_action, rescaled_qpos, rescaled_tcp_pose) in enumerate(zip(cameras, hand_cameras, rescaled_actions, rescaled_qposes, tcp_pose)): 
                 if np.all(rescaled_action[:6] == 0):

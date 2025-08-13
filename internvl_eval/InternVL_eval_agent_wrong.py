@@ -12,7 +12,7 @@ import mani_skill.envs
 import traceback
 import shutil
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
-from utils import quat_to_rpy, load_image, parse_and_validate_vector, append_to_jsonl, VideoRecorder, extract_action_vector
+from utils import quat_to_rpy, load_image, parse_and_validate_vector, append_to_jsonl, VideoRecorder
 from transformers.generation.logits_process import PrefixConstrainedLogitsProcessor, LogitsProcessor
 import math
 from transformers import LogitsProcessorList
@@ -28,51 +28,86 @@ class SafePrefixConstrainedLogitsProcessor(PrefixConstrainedLogitsProcessor):
             return scores + mask
         return super().__call__(input_ids, scores)
 
-def generate_prefix_fn(index2list):
+def generate_prefix_fn_legacy(numbers_list, start_list, end_list, connect_list):
+
     def prefix_allowed_tokens_fn(batch_id, input_ids):
-        return index2list[input_ids.shape[-1]]
+        if input_ids.shape[-1] == 14:
+            return end_list
+        if input_ids.shape[-1] == 0:
+            return start_list
+        elif input_ids.shape[-1] % 2 == 1:
+            return numbers_list
+        elif input_ids.shape[-1] % 2 == 0:
+            return connect_list
     return prefix_allowed_tokens_fn
 
-def prepare_logits_processor(tokenizer):
-    example_action_str = "action: {x: -18mm, y: -35mm, z: -28mm, roll: 0 degrees, pitch: 0 degrees, yaw: 4 degrees, open: 1}"
-    print("Example action\n", example_action_str)
-    toks = tokenizer.tokenize(example_action_str)
-    ids  = tokenizer.convert_tokens_to_ids(toks)
-    action_token_num = len(toks)
-    index2list = {}
-    numbers_index = [6, 12, 18, 24, 30, 36, 42]
-    valid_list = []
-    for idx, (tok, token_idx) in enumerate(zip(toks, ids)):
-        index2list[idx] = [token_idx]
-        valid_list.append(token_idx)
-    valid_list = set(valid_list)
+def generate_prefix_fn(numbers_list, symbols_list):
+    def prefix_allowed_tokens_fn(batch_id, input_ids):
+        if input_ids.shape[-1] % 2 == 0:
+            return symbols_list
+        elif input_ids.shape[-1] % 2 == 1:
+            return numbers_list
+    return prefix_allowed_tokens_fn
+
+
+def prepare_logits_processor(is_legacy, tokenizer):
     numbers = list(range(0, 1000))
     processor_list = LogitsProcessorList([])
-    connect_list = []
-    numbers_list = []
-    connect_sign = [" ", " -"]
-    for str_ in connect_sign:
-        toks = tokenizer.tokenize(str_)
-        assert len(toks) == 1
-        connect_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
-    for str_ in numbers:
-        toks = tokenizer.tokenize(str(str_))
-        assert len(toks) == 1
-        numbers_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
-    for idx in numbers_index:
-        index2list[idx] = numbers_list
-        index2list[idx - 1] = connect_list
-    prefix_processor = SafePrefixConstrainedLogitsProcessor(
-            prefix_allowed_tokens_fn=generate_prefix_fn(index2list),
-            num_beams=1,
-        )
-    processor_list = LogitsProcessorList([
-        prefix_processor,
-    ])
-    valid_list.update(numbers_list)
-    valid_list.update(connect_list)
-    valid_list = list(valid_list)
-    return processor_list, valid_list, action_token_num
+    if is_legacy:
+        print("Using action pattern: {-1 0 0 0 0 0 1}")
+        start_list = []
+        end_list = []
+        connect_list = []
+        numbers_list = []
+        start_sign = ["{", '{-',]
+        end_sign = ["}"]
+        connect_sign = [" ", " -"]
+        for str_ in start_sign:
+            toks = tokenizer.tokenize(str_)
+            assert len(toks) == 1
+            start_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        for str_ in end_sign:
+            toks = tokenizer.tokenize(str_)
+            assert len(toks) == 1
+            end_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        for str_ in connect_sign:
+            toks = tokenizer.tokenize(str_)
+            assert len(toks) == 1
+            connect_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        for str_ in numbers:
+            toks = tokenizer.tokenize(str(str_))
+            assert len(toks) == 1
+            numbers_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        prefix_processor = SafePrefixConstrainedLogitsProcessor(
+                prefix_allowed_tokens_fn=generate_prefix_fn_legacy(numbers_list, start_list, end_list, connect_list),
+                num_beams=1,
+            )
+        processor_list = LogitsProcessorList([
+            prefix_processor,
+        ])
+        valid_list = start_list + end_list + connect_list + numbers_list
+    else:
+        print("Using action pattern: 0 0 0 0 0 0 1")
+        connect_list = []
+        numbers_list = []
+        connect_sign = [" ", " -"]
+        for str_ in connect_sign:
+            toks = tokenizer.tokenize(str_)
+            assert len(toks) == 1
+            connect_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        for str_ in numbers:
+            toks = tokenizer.tokenize(str(str_))
+            assert len(toks) == 1
+            numbers_list.append(tokenizer.convert_tokens_to_ids(toks)[0])
+        prefix_processor = SafePrefixConstrainedLogitsProcessor(
+                prefix_allowed_tokens_fn=generate_prefix_fn(numbers_list, connect_list),
+                num_beams=1,
+            )
+        processor_list = LogitsProcessorList([
+            prefix_processor,
+        ])
+        valid_list = numbers_list + connect_list
+    return processor_list, valid_list
 
 class InternVLEvalAgent:
     def __init__(
@@ -102,6 +137,10 @@ class InternVLEvalAgent:
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             trust_remote_code=True).eval().to(device)
+        if "horizon" in model_dir_name:
+            self.horizon = int(model_dir_name.split("_")[-1])
+        else:
+            self.horizon = 1
         if 'joint' in model_dir_name:
             self.joint = True
         else:
@@ -113,13 +152,13 @@ class InternVLEvalAgent:
         if self.joint:
             self.action_rescale = np.array([1000, 1000, 1000, 1000, 1000, 1000, 1000, 1])
         else:
-            self.action_rescale = np.array([1000, 1000, 1000, 57.3, 57.3, 57.3, 1])
-            # self.action_rescale = np.array([1000, 1000, 1000, 1000, 1000, 1000, 1])
+            # self.action_rescale = np.array([1000, 1000, 1000, 57.3, 57.3, 57.3, 1])
+            self.action_rescale = np.array([1000, 1000, 1000, 1000, 1000, 1000, 1])
         self.action_dim = len(self.action_rescale)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
         is_legacy_action = True if 'legacy' in model_dir_name else False
-        processor_list, valid_list, max_new_tokens = prepare_logits_processor(self.tokenizer)
-        self.generation_config = dict(max_new_tokens=max_new_tokens, do_sample=True, logits_processor=processor_list)
+        processor_list, valid_list = prepare_logits_processor(is_legacy_action, self.tokenizer)
+        self.generation_config = dict(max_new_tokens=15 if is_legacy_action else (self.action_dim * 2 * self.horizon), do_sample=True, logits_processor=processor_list)
         self.instruction = 'stack the red cube on top of the green one' if instruction is None else instruction
         jsonl_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") if inference_tag is None else inference_tag
         self.jsonl_path = os.path.join(model_path, parent_tag, jsonl_name, 'inference.jsonl')
@@ -154,9 +193,8 @@ class InternVLEvalAgent:
             # else:
             #     query = f"The current position state of the robotic arm's end gripper is as follows: {{x: {eef_xyz[0]}mm, y: {eef_xyz[1]}mm, z: {eef_xyz[2]}mm, roll: {eef_rpy[0]} degrees, pitch: {eef_rpy[1]} degrees, yaw: {eef_rpy[2]} degrees, open: {gripper_state}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
             # joints_str = ", ".join(f"Joint_{i}: {v}" for i, v in enumerate(rescaled_qpos[:9]))
-            # joints_str = ", ".join(f"Joint_{i}: {v}" for i, v in enumerate(rescaled_qpos[:8]))
-            # query = f"The current position state of the robotic arm's end gripper is as follows: {{{joints_str}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
-            query = f"The current position state of the robotic arm's end gripper is as follows: {{x: {eef_xyz[0]}mm, y: {eef_xyz[1]}mm, z: {eef_xyz[2]}mm, roll: {eef_rpy[0]} degrees, pitch: {eef_rpy[1]} degrees, yaw: {eef_rpy[2]} degrees, open: {gripper_state}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
+            joints_str = ", ".join(f"Joint_{i}: {v}" for i, v in enumerate(rescaled_qpos[:8]))
+            query = f"The current position state of the robotic arm's end gripper is as follows: {{{joints_str}}}. What action should the robot take to get better completion of instruction: {self.instruction}?"
             pixel_0 = load_image(camera, max_num=12).to(torch.bfloat16).to(self.device)
             patch_list = []
             pixels = []
@@ -190,7 +228,7 @@ class InternVLEvalAgent:
         for env_id in range(self.num_envs):
             question = questions[env_id]
             response = responses[env_id]
-            action_extracted = extract_action_vector(response)
+            action_extracted = parse_and_validate_vector(response, self.action_dim)
             if action_extracted is None:
                 action_extracted = np.zeros(self.action_dim, dtype=np.float64)
                 if qposes[env_id][-1] >= 0.037:
@@ -200,9 +238,6 @@ class InternVLEvalAgent:
             else:
                 # action_extracted[:-1] = action_extracted[:-1] / 1000
                 action_extracted = action_extracted / self.action_rescale
-                if action_extracted[-1] <= 0.5:
-                    action_extracted[-1] = -1
-                
             # print("-----------------------------------------------------")
             action_to_print = [np.round(a, 3) for a in action_extracted.values()] if isinstance(action_extracted, dict) else [np.round(a, 3) for a in action_extracted]
             # print(f'User: {question}\nAction: {action_to_print}')
