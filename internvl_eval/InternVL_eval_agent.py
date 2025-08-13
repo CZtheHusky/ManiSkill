@@ -16,6 +16,7 @@ from utils import quat_to_rpy, load_image, parse_and_validate_vector, append_to_
 from transformers.generation.logits_process import PrefixConstrainedLogitsProcessor, LogitsProcessor
 import math
 from transformers import LogitsProcessorList
+from tqdm import tqdm
 
 class SafePrefixConstrainedLogitsProcessor(PrefixConstrainedLogitsProcessor):
     def __call__(self, input_ids, scores):
@@ -268,7 +269,7 @@ def eval_checkpoint(model_parent, ckpt_name, env_id, gpu_id):
             num_envs=num_envs,
             obs_mode="rgb",
             control_mode="pd_joint_delta_pos" if "joint" in model_path else "pd_ee_delta_pose",
-            sensor_configs={'height': 448, 'width': 448},
+            sensor_configs={'height': 480, 'width': 480},
             max_episode_steps=max_episode_steps,
             reconfiguration_freq=1,
             reward_mode='sparse',
@@ -280,7 +281,7 @@ def eval_checkpoint(model_parent, ckpt_name, env_id, gpu_id):
         obs, _ = eval_envs.reset(seed=0)
         eval_metrics = defaultdict(list)
         last_obs = obs
-        for i in range(eval_steps):
+        for i in tqdm(range(eval_steps)):
             actions = agent.get_next_action(obs)
             obs, reward, terminated, truncated, infos = eval_envs.step(actions)
             # success = infos['success'].cpu().numpy()
