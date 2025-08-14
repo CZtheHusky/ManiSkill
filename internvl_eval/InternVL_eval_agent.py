@@ -331,39 +331,38 @@ if __name__ == "__main__":
     #     pool.starmap(eval_checkpoint, tasks_to_run)
     # # Define which GPUs to use
     # AVAILABLE_GPUS = [0,1,2,3,4,5,6,7] # Modify this to match your system
-    
-    # AVAILABLE_GPUS = [0,1,2,3,4,5,6,7]
-    # NUM_GPUS = len(AVAILABLE_GPUS)
+    AVAILABLE_GPUS = [1,2]
+    NUM_GPUS = len(AVAILABLE_GPUS)
 
 
     # tasks_to_run = []
 
-    # model_parents = [
-    #     # "vlav-project/maniskill_joint_dual/internvl2-2b/v0-20250809-021840",
-    #     # "vlav-project/maniskill_joint_epds_dual/internvl2-2b/v0-20250809-030109",
-    #     # "vlav-project/maniskill_legacy_reproduce_dual/internvl2-2b/v0-20250810-005645",
-    #     # "vlav-project/train_push_cube500_legacy/internvl2-2b/v0-20250812-011657",
-    #     # "vlav-project/mani_stack_cubes_dual_joint_legacy_reproduce/internvl2-2b/v0-20250810-160449",
-    #     # "vlav-project/mani_new_legacy_reproduce_dual/internvl2-2b/v0-20250810-172603",
-    #     "vlav-project/train_stack_cube100/internvl2-2b/v2-20250813-084855"
-    # ]
-    # env_ids = ['StackCube-v1'] * len(model_parents)
-    # # instructions = ['push the cube to the target position'] * len(model_parents)
-    # global_index = 0
-    # for model_parent, env_id in zip(model_parents, env_ids):
-    #     print("Model_path:", model_parent)
-    #     checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
-    #     checkpoints.sort(key=lambda x: int(x.split('-')[-1]), reverse=True)        
-    #     for i, ckpt_name in enumerate(checkpoints): 
-    #         gpu_id = AVAILABLE_GPUS[global_index % NUM_GPUS] # Cycle through available GPUs
-    #         tasks_to_run.append((model_parent, ckpt_name, env_id, gpu_id))
-    #         global_index += 1
-    # print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
-    # for task in tasks_to_run:
-    #     print(task)
-    # # 2. Create a process pool and run the tasks in parallel
-    # with multiprocessing.Pool(processes=NUM_GPUS) as pool:
-    #     # Use starmap to pass multiple arguments to the worker function
-    #     pool.starmap(eval_checkpoint, tasks_to_run)
-    tokenizer = AutoTokenizer.from_pretrained("/root/workspace/vlav-project/train_stack_cube100/internvl2-2b/v2-20250813-084855/checkpoint-930", trust_remote_code=True)
-    prepare_logits_processor(tokenizer)
+    model_parents = [
+        # "vlav-project/maniskill_joint_dual/internvl2-2b/v0-20250809-021840",
+        # "vlav-project/maniskill_joint_epds_dual/internvl2-2b/v0-20250809-030109",
+        # "vlav-project/maniskill_legacy_reproduce_dual/internvl2-2b/v0-20250810-005645",
+        # "vlav-project/train_push_cube500_legacy/internvl2-2b/v0-20250812-011657",
+        # "vlav-project/mani_stack_cubes_dual_joint_legacy_reproduce/internvl2-2b/v0-20250810-160449",
+        # "vlav-project/mani_new_legacy_reproduce_dual/internvl2-2b/v0-20250810-172603",
+        # "vlav-project/train_stack_cube100/internvl2-2b/v2-20250813-084855"
+        # "vlav-project/train_push_cube500/internvl2-2b/v2-20250813-164406"
+        "vlav-project/train_push_cube/internvl2-2b/v0-20250813-184026"
+    ]
+    env_ids = ['PushCube-v1'] * len(model_parents)
+    # instructions = ['push the cube to the target position'] * len(model_parents)
+    global_index = 0
+    for model_parent, env_id in zip(model_parents, env_ids):
+        print("Model_path:", model_parent)
+        checkpoints = [ckpt for ckpt in os.listdir(model_parent) if ckpt.startswith("checkpoint")]
+        checkpoints.sort(key=lambda x: int(x.split('-')[-1]), reverse=True)        
+        for i, ckpt_name in enumerate(checkpoints): 
+            gpu_id = AVAILABLE_GPUS[global_index % NUM_GPUS] # Cycle through available GPUs
+            tasks_to_run.append((model_parent, ckpt_name, env_id, gpu_id))
+            global_index += 1
+    print(f"Found {len(tasks_to_run)} checkpoints to evaluate on {NUM_GPUS} GPUs.")
+    for task in tasks_to_run:
+        print(task)
+    # 2. Create a process pool and run the tasks in parallel
+    with multiprocessing.Pool(processes=NUM_GPUS) as pool:
+        # Use starmap to pass multiple arguments to the worker function
+        pool.starmap(eval_checkpoint, tasks_to_run[3:])
